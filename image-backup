@@ -19,9 +19,9 @@ mkloop1()
   local START1=0
 
   sync
-  INFO1="$(fdisk -lu "${IMGFILE}")"
-  START1=$(grep W95 <<< "${INFO1}" | awk '{print $2}')
-  SIZE1=$(grep W95 <<< "${INFO1}" | awk '{print $4}')
+  INFO1="$(sfdisk -d "${IMGFILE}")"
+  START1=$(grep type=c <<< "${INFO1}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
+  SIZE1=$(grep type=c <<< "${INFO1}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
   LOOP1="$(losetup -f --show -o $((${START1} * 512)) --sizelimit $((${SIZE1} * 512)) "${IMGFILE}")"
   if [ $? -ne 0 ]; then
     errexit "Unable to create BOOT loop device"
@@ -44,9 +44,9 @@ mkloop2()
   local START2=0
 
   sync
-  INFO2="$(fdisk -lu "${IMGFILE}")"
-  START2=$(grep Linux <<< "${INFO2}" | awk '{print $2}')
-  SIZE2=$(grep Linux <<< "${INFO2}" | awk '{print $4}')
+  INFO2="$(sfdisk -d "${IMGFILE}")"
+  START2=$(grep type=83 <<< "${INFO2}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
+  SIZE2=$(grep type=83 <<< "${INFO2}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
   LOOP2="$(losetup -f --show -o $((${START2} * 512)) --sizelimit $((${SIZE2} * 512)) "${IMGFILE}")"
   if [ $? -ne 0 ]; then
     errexit "Unable to create ROOT loop device"
@@ -64,6 +64,7 @@ rmloop2()
 
 mntimg()
 {
+  MNTED=TRUE
   if [ ! -d "${MNTPATH}/" ]; then
     mkdir "${MNTPATH}/"
     if [ $? -ne 0 ]; then
@@ -101,6 +102,7 @@ umntimg()
   fi
   rmloop2
   rm -r "${MNTPATH}/"
+  MNTED=FALSE
 }
 
 errexit()
@@ -108,9 +110,11 @@ errexit()
   echo ""
   echo "$1"
   echo ""
-  umount "${MNTPATH}/boot/" &> /dev/null
-  umount "${MNTPATH}/" &> /dev/null
-  rm -r "${MNTPATH}/" &> /dev/null
+  if [ "${MNTED}" = "TRUE" ]; then
+    umount "${MNTPATH}/boot/" &> /dev/null
+    umount "${MNTPATH}/" &> /dev/null
+    rm -rf "${MNTPATH}/" &> /dev/null
+  fi
   rmloop1
   rmloop2
   exit 1
@@ -118,12 +122,20 @@ errexit()
 
 LOOP1=""
 LOOP2=""
+MNTED=FALSE
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 if [ $(id -u) -ne 0 ]; then
   errexit "$0 must be run as root user"
 fi
+
+PGMNAME="$(basename $0)"
+for PID in $(pidof -x -o %PPID "${PGMNAME}"); do
+  if [ ${PID} -ne $$ ]; then
+    errexit "${PGMNAME} is already running"
+  fi
+done
 
 rsync --version &> /dev/null
 if [ $? -ne 0 ]; then
@@ -173,7 +185,9 @@ if [ "${IMGFILE}" = "" ]; then
   do
     echo ""
     read -r -e -i "${IMGFILE}" -p "Image file to create? " IMGFILE
-    if [[ ! "${IMGFILE}" =~ ^/mnt/.*$ && ! "${IMGFILE}" =~ ^/media/.*$ ]]; then
+    if [ "${IMGFILE}" = "" ]; then
+      continue
+    elif [[ ! "${IMGFILE}" =~ ^/mnt/.*$ && ! "${IMGFILE}" =~ ^/media/.*$ ]]; then
       echo ""
       echo "${IMGFILE} does not begin with /mnt/ or /media/"
       continue

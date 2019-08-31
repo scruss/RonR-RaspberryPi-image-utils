@@ -41,8 +41,10 @@ image-set-ptuuid imagefile ptuuid
 where ptuuid is 8 hex digits
 
 
+image-shrink:
+
 image-shrink shrinks a standard 'raw' image file to its smallest possible size (plus an optional additional amount of free space).  Usage is:
 
 image-shrink imagefile [Additional MB]
 
-where Additional MB is an additional amount of free space to be added.
+where Additional MB is an optional additional amount of free space to be added.

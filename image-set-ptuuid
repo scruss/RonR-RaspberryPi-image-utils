@@ -9,9 +9,9 @@ mkloop1()
   local INFO1=""
   local SIZE1=0
 
-  INFO1="$(fdisk -lu "${IMGFILE}")"
-  START1=$(grep W95 <<< "${INFO1}" | awk '{print $2}')
-  SIZE1=$(grep W95 <<< "${INFO1}" | awk '{print $4}')
+  INFO1="$(sfdisk -d "${IMGFILE}")"
+  START1=$(grep type=c <<< "${INFO1}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
+  SIZE1=$(grep type=c <<< "${INFO1}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
   LOOP1="$(losetup -f --show -o $((${START1} * 512)) --sizelimit $((${SIZE1} * 512)) "${IMGFILE}")"
   if [ $? -ne 0 ]; then
     errexit "Unable to create BOOT loop device"
@@ -31,9 +31,9 @@ mkloop2()
   local INFO2=""
   local SIZE2=0
 
-  INFO2="$(fdisk -lu "${IMGFILE}")"
-  START2=$(grep Linux <<< "${INFO2}" | awk '{print $2}')
-  SIZE2=$(grep Linux <<< "${INFO2}" | awk '{print $4}')
+  INFO2="$(sfdisk -d "${IMGFILE}")"
+  START2=$(grep type=83  <<< "${INFO2}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
+  SIZE2=$(grep type=83  <<< "${INFO2}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
   LOOP2="$(losetup -f --show -o $((${START2} * 512)) --sizelimit $((${SIZE2} * 512)) "${IMGFILE}")"
   if [ $? -ne 0 ]; then
     errexit "Unable to create ROOT loop device"
@@ -50,6 +50,7 @@ rmloop2()
 
 mntimg()
 {
+  MNTED=TRUE
   if [ ! -d "${MNTPATH}/" ]; then
     mkdir "${MNTPATH}/"
     if [ $? -ne 0 ]; then
@@ -86,7 +87,23 @@ umntimg()
     errexit "Unable to unmount image ROOT partition"
   fi
   rmloop2
-  rm -r "${MNTPATH}/"
+  rm -rf "${MNTPATH}/"
+  MNTED=FALSE
+}
+
+errexit()
+{
+  echo ""
+  echo "$1"
+  echo ""
+  if [ "${MNTED}" = "TRUE" ]; then
+    umount "${MNTPATH}/boot/" &> /dev/null
+    umount "${MNTPATH}/" &> /dev/null
+    rm -rf "${MNTPATH}/" &> /dev/null
+  fi
+  rmloop1
+  rmloop2
+  exit 1
 }
 
 ckfs()
@@ -104,19 +121,6 @@ ckfs()
   fi
 }
 
-errexit()
-{
-  echo ""
-  echo "$1"
-  echo ""
-  umount "${MNTPATH}/boot/" &> /dev/null
-  umount "${MNTPATH}/" &> /dev/null
-  rm -r "${MNTPATH}/" &> /dev/null
-  rmloop1
-  rmloop2
-  exit 1
-}
-
 usage()
 {
   errexit "Usage: $0 imagefile ptuuid"
@@ -124,10 +128,18 @@ usage()
 
 LOOP1=""
 LOOP2=""
+MNTED=FALSE
 
 if [ $(id -u) -ne 0 ]; then
   errexit "$0 must be run as root user"
 fi
+
+PGMNAME="$(basename $0)"
+for PID in $(pidof -x -o %PPID "${PGMNAME}"); do
+  if [ ${PID} -ne $$ ]; then
+    errexit "${PGMNAME} is already running"
+  fi
+done
 
 IMGFILE="$1"
 PTUUID="$2"

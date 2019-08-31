@@ -29,13 +29,13 @@ if [ ! -f "${IMG}" ]; then
 fi
 
 if [ "${PART}" = "" ]; then
-  PART="Linux"
+  PART="type=83"
 else
   PART="$(tr [A-Z] [a-z] <<< "${PART}")"
   if [ "${PART}" = "w95" ];then
-    PART="W95"
+    PART="type=c"
   elif [ "${PART}" = "linux" ];then
-    PART="Linux"
+    PART="type=83"
   else
     usage
   fi
@@ -55,15 +55,15 @@ while read -r -n 1 -s answer; do
 done
 echo ""
 
-INFO="$(fdisk -lu "${IMG}")"
-START="$(grep "${PART}" <<< "${INFO}" | awk '{print $2}')"
-SIZE="$(grep "${PART}" <<< "${INFO}" | awk '{print $4}')"
+INFO="$(sfdisk -d "${IMG}")"
+START=$(grep "${PART}" <<< "${INFO}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
+SIZE=$(grep "${PART}" <<< "${INFO}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
 LOOP="$(losetup -f --show -o $((${START} * 512)) --sizelimit $((${SIZE} * 512)) "${IMG}")"
 if [ $? -ne 0 ]; then
   errexit "Unable to create BOOT loop device"
 fi
 FS_TYPE=$(blkid "${LOOP}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
-if [ "${PART}" = "W95" ]; then
+if [ "${PART}" = "type=c" ]; then
   dosfsck "${LOOP}"
 else
   if [ "${FS_TYPE}" = "f2fs" ]; then
