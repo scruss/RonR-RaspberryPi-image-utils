@@ -181,10 +181,10 @@ w
 EOF
 mntimg
 sync
-PARTUUID="$(sed -n 's|^.*PARTUUID=\(\S\+\)\s.*|\1|p' "${MNTPATH}/boot/cmdline.txt")"
+PARTUUID="$(sed -n '/^[[:space:]]*#/!s|^.*PARTUUID=\(\S\+\)\s.*|\1|p' "${MNTPATH}/boot/cmdline.txt")"
 if [ "${PARTUUID}" != "" ]; then
-  sed -i "s|PARTUUID=\S\+\s|PARTUUID=${PTUUID}-02 |" "${MNTPATH}/boot/cmdline.txt"
-  sed -i "s|${PARTUUID:0:(${#PARTUUID} - 1)}|${PTUUID}-0|" "${MNTPATH}/etc/fstab"
+  sed -i "/^[[:space:]]*#/!s|PARTUUID=\S\+\s|PARTUUID=${PTUUID}-02 |" "${MNTPATH}/boot/cmdline.txt"
+  sed -i "/^[[:space:]]*#/!s|${PARTUUID:0:(${#PARTUUID} - 1)}|${PTUUID}-0|" "${MNTPATH}/etc/fstab"
 fi
 sync
 umntimg

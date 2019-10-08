@@ -321,10 +321,32 @@ fi
 
 mntimg
 sync
-rsync -aDH --partial --numeric-ids --delete --force --exclude "${MNTPATH}" --exclude '/dev' --exclude '/media' --exclude '/mnt' --exclude '/proc' --exclude '/run' --exclude '/sys' \
---exclude '/tmp' --exclude 'lost\+found' --exclude '/etc/udev/rules.d/70-persistent-net.rules' --exclude '/var/lib/asterisk/astdb.sqlite3-journal' / "${MNTPATH}/"
+rsync -aDH --partial --numeric-ids --delete --force --exclude "${MNTPATH}" --exclude '/dev' --exclude '/media' --exclude '/mnt' --exclude '/proc' \
+--exclude '/run' --exclude '/sys' --exclude '/tmp' --exclude '/lost+found' --exclude '/etc/udev/rules.d/70-persistent-net.rules' \
+--exclude '/var/lib/asterisk/astdb.sqlite3-journal' / "${MNTPATH}/"
 if [[ $? -ne 0 && $? -ne 24 ]]; then
   errexit "Unable to create backup"
+fi
+if [[ $(grep -v '^[[:space:]]*#' "${MNTPATH}/etc/rc.local" | grep -c 'resize-root-fs') -eq 0 && "${ROOT_TYPE}" != "f2fs" ]]; then
+  cat <<\EOF > "${MNTPATH}/etc/resize-root-fs"
+#!/bin/bash
+
+cp /usr/bin/raspi-config /tmp/raspi-config
+ROOT_PART="$(mount | sed -n 's|^/dev/\(.*\) on / .*|\1|p')"
+if [ "${ROOT_PART}" != "mmcblk0p2" ]; then
+  ROOT_DEV="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
+  sed -i -E "s/mmcblk0p?/${ROOT_DEV}/" /tmp/raspi-config
+  sed -i 's|    resize2fs /dev/$ROOT_PART &&|    ROOT_DEV=\\$(findmnt / -o source -n) \&\&\n    resize2fs \\$ROOT_DEV \&\&|' /tmp/raspi-config
+fi
+/tmp/raspi-config --expand-rootfs &> /dev/null
+rm /tmp/raspi-config
+sed -i '/resize-root-fs/d' /etc/rc.local
+rm /etc/resize-root-fs
+shutdown --no-wall -r now
+exit 0
+EOF
+  chmod +x "${MNTPATH}/etc/resize-root-fs"
+  sed -i 's|^exit 0$|/etc/resize-root-fs\nexit 0|' "${MNTPATH}/etc/rc.local"
 fi
 sync
 umntimg
