@@ -2,8 +2,6 @@
 
 trap '{ stty sane; echo ""; errexit "Aborted"; }' SIGINT SIGTERM
 
-ADDBLK=0
-
 BOOTBEG=8192
 BOOTEND=532480
 ROOTBEG=540672
@@ -51,6 +49,7 @@ mkloop2()
   if [ $? -ne 0 ]; then
     errexit "Unable to create ROOT loop device"
   fi
+  START=${START2}
 }
 
 rmloop2()
@@ -120,6 +119,46 @@ errexit()
   exit 1
 }
 
+fsckerr()
+{
+  errexit "Filesystem appears corrupted "$1" resize2fs"
+}
+
+backup()
+{
+  mntimg
+  sync
+  rsync -aDH --partial --numeric-ids --delete --force --exclude "${MNTPATH}" --exclude '/dev' --exclude '/media' --exclude '/mnt' --exclude '/proc' \
+--exclude '/run' --exclude '/sys' --exclude '/tmp' --exclude '/lost+found' --exclude '/etc/udev/rules.d/70-persistent-net.rules' \
+--exclude '/var/lib/asterisk/astdb.sqlite3-journal' / "${MNTPATH}/"
+  if [[ $? -ne 0 && $? -ne 24 ]]; then
+    errexit "Unable to create backup"
+  fi
+  if [[ $(grep -v '^[[:space:]]*#' "${MNTPATH}/etc/rc.local" | grep -c 'resize-root-fs') -eq 0 && "${ROOT_TYPE}" != "f2fs" ]]; then
+    cat <<\EOF > "${MNTPATH}/etc/resize-root-fs"
+#!/bin/bash
+
+cp /usr/bin/raspi-config /tmp/raspi-config
+ROOT_PART="$(mount | sed -n 's|^/dev/\(.*\) on / .*|\1|p')"
+if [ "${ROOT_PART}" != "mmcblk0p2" ]; then
+  ROOT_DEV="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
+  sed -i -E "s/mmcblk0p?/${ROOT_DEV}/" /tmp/raspi-config
+  sed -i 's|    resize2fs /dev/$ROOT_PART &&|    ROOT_DEV=\\$(findmnt / -o source -n) \&\&\n    resize2fs \\$ROOT_DEV \&\&|' /tmp/raspi-config
+fi
+/tmp/raspi-config --expand-rootfs &> /dev/null
+rm /tmp/raspi-config
+sed -i '/resize-root-fs/d' /etc/rc.local
+rm /etc/resize-root-fs
+shutdown --no-wall -r now
+exit 0
+EOF
+    chmod +x "${MNTPATH}/etc/resize-root-fs"
+    sed -i 's|^exit 0$|/etc/resize-root-fs\nexit 0|' "${MNTPATH}/etc/rc.local"
+  fi
+  sync
+  umntimg
+}
+
 LOOP1=""
 LOOP2=""
 MNTED=FALSE
@@ -168,16 +207,11 @@ fi
 
 PTUUID="$(blkid "/dev/${ROOT_DEV}" | sed -n 's|^.*PTUUID="\(\S\+\)".*|\1|p')"
 
-DEVSIZE=$(blockdev --getsize64 "/dev/${ROOT_PART}")
-BLKSIZE=$(blockdev --getbsz "/dev/${ROOT_PART}")
-BLKCNT=$((${DEVSIZE} / ${BLKSIZE}))
-INFO="$(df | grep /dev/root)"
+INFO="$(df | grep "% /$")"
 DFKSIZE=$(awk '{print $2}' <<< "${INFO}")
 DFKFREE=$(awk '{print $4}' <<< "${INFO}")
-ROOTSIZE=$((${BLKCNT} * ${BLKSIZE}))
-ROOTUSED=$(((${DFKSIZE} - ${DFKFREE}) * 1024))
-IRFSMIN=$(((${ROOTUSED} + (${ADDBLK} * ${BLKSIZE}) + (${ONEMB} - 1)) / ${ONEMB}))
-IRFSMAX=$(((${ROOTSIZE} + (${ONEMB} - 1)) / ${ONEMB}))
+INISIZE=$(((${DFKSIZE} - ${DFKFREE}) / 1024))
+BLKSIZE=$(blockdev --getbsz "/dev/${ROOT_PART}")
 
 IMGFILE="$1"
 if [ "${IMGFILE}" = "" ]; then
@@ -212,24 +246,20 @@ if [ "${IMGFILE}" = "" ]; then
       break
     fi
   done
-  IRFSSIZE=""
-  while :
-  do
-    echo ""
-    read -r -e -i "${IRFSSIZE}" -p "Image ROOT filesystem size (MB) [${IRFSMAX}]? " IRFSSIZE
-    if [ "${IRFSSIZE}" = "" ]; then
-      IRFSSIZE=${IRFSMAX}
-      break
-    elif [ ${IRFSSIZE} -ge ${IRFSMIN} ]; then
-      break
-    else
-      echo ""
-      echo "Requested image ROOT filesystem size (${IRFSSIZE}) is too small (Minimum = ${IRFSMIN})"
-      IRFSSIZE=${IRFSMIN}
-    fi
-  done
   echo ""
-  echo -n "Create ${IMGFILE} [${IRFSSIZE} MB] (y/n)? "
+  read -r -e -p "Initial image file ROOT filesystem size (MB) [${INISIZE}]? " IRFSSIZE
+  if [ "${IRFSSIZE}" = "" ]; then
+    IRFSSIZE=${INISIZE}
+  fi
+  if [ "${ROOT_TYPE}" != "f2fs" ]; then
+    echo ""
+    read -r -e -p "Added space for incremental updates after shrinking (MB) [0]? " ADDMB
+    if [ "${ADDMB}" = "" ]; then
+      ADDMB=0
+    fi
+  fi
+  echo ""
+  echo -n "Create ${IMGFILE} (y/n)? "
   while read -r -n 1 -s answer; do
     if [[ "${answer}" = [yYnN] ]]; then
       echo "${answer}"
@@ -308,6 +338,58 @@ EOF
   umntimg
   echo ""
   echo "Starting full backup (for incremental backups, run: $0 ${IMGFILE})"
+  backup
+  if [ "${ROOT_TYPE}" != "f2fs" ]; then
+    echo ""
+    mkloop2
+    e2fsck -f "${LOOP2}"
+    if [ $? -ne 0 ]; then
+      fsckerr "before"
+    fi
+    echo ""
+    resize2fs -M "${LOOP2}"
+    resize2fs -M "${LOOP2}"
+    resize2fs -M "${LOOP2}"
+    e2fsck -f "${LOOP2}"
+    if [ $? -ne 0 ]; then
+      fsckerr "after"
+    fi
+    INFO="$(tune2fs -l "${LOOP2}" 2>/dev/null)"
+    rmloop2
+    NEWSIZE=$(grep '^Block count:' <<< "${INFO}" | awk '{print $3}')
+    BLKSIZE=$(grep '^Block size:' <<< "${INFO}" | awk '{print $3}')
+    NEWEND=$((${START} + (${NEWSIZE} * (${BLKSIZE} / 512)) + ((${ADDMB} * ${ONEMB}) / 512) - 1))
+    truncate -s $(((${NEWEND} + 1) * 512)) "${IMGFILE}"
+    fdisk "${IMGFILE}" <<EOF > /dev/null
+p
+d
+2
+n
+p
+2
+${START}
+${NEWEND}
+p
+w
+EOF
+    if [ ${ADDMB} -ne 0 ]; then
+      echo ""
+      mkloop2
+      e2fsck -f "${LOOP2}"
+      if [ $? -ne 0 ]; then
+        fsckerr "before"
+      fi
+      echo ""
+      resize2fs "${LOOP2}"
+      e2fsck -f "${LOOP2}"
+      if [ $? -ne 0 ]; then
+        fsckerr "after"
+      fi
+      rmloop2
+    fi
+  fi
+  backup
+  echo ""
 else
   if [[ ! "${IMGFILE}" =~ ^/mnt/.*$ && ! "${IMGFILE}" =~ ^/media/.*$ ]]; then
     errexit "${IMGFILE} does not begin with /mnt/ or /media/"
@@ -317,36 +399,5 @@ else
   elif [ ! -f "${IMGFILE}" ]; then
     errexit "${IMGFILE} not found"
   fi
+  backup
 fi
-
-mntimg
-sync
-rsync -aDH --partial --numeric-ids --delete --force --exclude "${MNTPATH}" --exclude '/dev' --exclude '/media' --exclude '/mnt' --exclude '/proc' \
---exclude '/run' --exclude '/sys' --exclude '/tmp' --exclude '/lost+found' --exclude '/etc/udev/rules.d/70-persistent-net.rules' \
---exclude '/var/lib/asterisk/astdb.sqlite3-journal' / "${MNTPATH}/"
-if [[ $? -ne 0 && $? -ne 24 ]]; then
-  errexit "Unable to create backup"
-fi
-if [[ $(grep -v '^[[:space:]]*#' "${MNTPATH}/etc/rc.local" | grep -c 'resize-root-fs') -eq 0 && "${ROOT_TYPE}" != "f2fs" ]]; then
-  cat <<\EOF > "${MNTPATH}/etc/resize-root-fs"
-#!/bin/bash
-
-cp /usr/bin/raspi-config /tmp/raspi-config
-ROOT_PART="$(mount | sed -n 's|^/dev/\(.*\) on / .*|\1|p')"
-if [ "${ROOT_PART}" != "mmcblk0p2" ]; then
-  ROOT_DEV="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
-  sed -i -E "s/mmcblk0p?/${ROOT_DEV}/" /tmp/raspi-config
-  sed -i 's|    resize2fs /dev/$ROOT_PART &&|    ROOT_DEV=\\$(findmnt / -o source -n) \&\&\n    resize2fs \\$ROOT_DEV \&\&|' /tmp/raspi-config
-fi
-/tmp/raspi-config --expand-rootfs &> /dev/null
-rm /tmp/raspi-config
-sed -i '/resize-root-fs/d' /etc/rc.local
-rm /etc/resize-root-fs
-shutdown --no-wall -r now
-exit 0
-EOF
-  chmod +x "${MNTPATH}/etc/resize-root-fs"
-  sed -i 's|^exit 0$|/etc/resize-root-fs\nexit 0|' "${MNTPATH}/etc/rc.local"
-fi
-sync
-umntimg
