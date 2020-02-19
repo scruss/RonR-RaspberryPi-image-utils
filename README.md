@@ -1,5 +1,7 @@
 # RonR-RaspberryPi-image-utils
 
+**NB** scruss is *not* the author or maintainer of thse files. No — and I mean **no** — issues will be accespted on this repo. Take it up in the [Image File Utilities](https://www.raspberrypi.org/forums/viewtopic.php?t=247568#p1511694) thread.
+
 Tools to create a backup of a running Raspbian system to an SD card image file.
 
 This is a copy of the files that [Raspberry Pi Forums](https://www.raspberrypi.org/forums/index.php) user [RonR](https://www.raspberrypi.org/forums/memberlist.php?mode=viewprofile&u=186692) posted to the topic [Image File Utilities](https://www.raspberrypi.org/forums/viewtopic.php?t=247568#p1511694) on 2019-08-01. File attachments to this forum don't seem to be persistent, so this repo was created to ensure a working snapshot is always available.
