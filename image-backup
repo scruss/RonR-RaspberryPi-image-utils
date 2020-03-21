@@ -107,7 +107,7 @@ umntimg()
 errexit()
 {
   echo ""
-  echo "$1"
+  echo -e "$1"
   echo ""
   if [ "${MNTED}" = "TRUE" ]; then
     umount "${MNTPATH}/boot/" &> /dev/null
@@ -124,18 +124,33 @@ fsckerr()
   errexit "Filesystem appears corrupted "$1" resize2fs"
 }
 
+usage()
+{
+  errexit "Usage: $0 [options] [pathto/imagefile for incremental backup]\n\
+-h,--help       This usage description\n\
+-i,--initial    pathto/filename of image file [,inital size MB [,added space for incremental MB]]\n\
+-n,--noexpand   Do not expand filesystem on first run after restore\n\
+-o,--options    Additional rsync options (comma separated)"
+}
+
 backup()
 {
   mntimg
   sync
-  rsync -aDH --partial --numeric-ids --delete --force --exclude "${MNTPATH}" --exclude '/dev' --exclude '/media' --exclude '/mnt' --exclude '/proc' \
---exclude '/run' --exclude '/sys' --exclude '/tmp' --exclude '/lost+found' --exclude '/etc/udev/rules.d/70-persistent-net.rules' \
---exclude '/var/lib/asterisk/astdb.sqlite3-journal' / "${MNTPATH}/"
+  rsync -aDH --partial --numeric-ids --delete --force --exclude "${MNTPATH}" --exclude '/dev' --exclude '/lost+found' --exclude '/media' --exclude '/mnt' \
+--exclude '/proc' --exclude '/run' --exclude '/sys' --exclude '/tmp' --exclude '/etc/udev/rules.d/70-persistent-net.rules' \
+--exclude '/var/lib/asterisk/astdb.sqlite3-journal' "${OPTIONS[@]}" / "${MNTPATH}/"
   if [[ $? -ne 0 && $? -ne 24 ]]; then
     errexit "Unable to create backup"
   fi
-  if [[ $(grep -v '^[[:space:]]*#' "${MNTPATH}/etc/rc.local" | grep -c 'resize-root-fs') -eq 0 && "${ROOT_TYPE}" != "f2fs" ]]; then
-    cat <<\EOF > "${MNTPATH}/etc/resize-root-fs"
+  mkdir -p "${MNTPATH}/dev/" "${MNTPATH}/lost+found/" "${MNTPATH}/media/" "${MNTPATH}/mnt/" "${MNTPATH}/proc/" "${MNTPATH}/run/" "${MNTPATH}/sys/" "${MNTPATH}/tmp/"
+  if [ $? -ne 0 ]; then
+    errexit "Unable to create image directories"
+  fi
+  chmod a+rwxt "${MNTPATH}/tmp/"
+  if [ "${NOEXPAND}" = "FALSE" ]; then
+    if [[ $(grep -v '^[[:space:]]*#' "${MNTPATH}/etc/rc.local" | grep -c 'resize-root-fs') -eq 0 && "${ROOT_TYPE}" != "f2fs" ]]; then
+      cat <<\EOF > "${MNTPATH}/etc/resize-root-fs"
 #!/bin/bash
 
 cp /usr/bin/raspi-config /tmp/raspi-config
@@ -152,8 +167,9 @@ rm /etc/resize-root-fs
 shutdown --no-wall -r now
 exit 0
 EOF
-    chmod +x "${MNTPATH}/etc/resize-root-fs"
-    sed -i 's|^exit 0$|/etc/resize-root-fs\nexit 0|' "${MNTPATH}/etc/rc.local"
+      chmod +x "${MNTPATH}/etc/resize-root-fs"
+      sed -i 's|^exit 0$|/etc/resize-root-fs\nexit 0|' "${MNTPATH}/etc/rc.local"
+    fi
   fi
   sync
   umntimg
@@ -213,63 +229,130 @@ DFKFREE=$(awk '{print $4}' <<< "${INFO}")
 INISIZE=$(((${DFKSIZE} - ${DFKFREE}) / 1024))
 BLKSIZE=$(blockdev --getbsz "/dev/${ROOT_PART}")
 
-IMGFILE="$1"
+IMGNAME=""
+IMGSIZE=""
+IMGINCR=""
+IMGFILE=""
+OPTIONS=()
+NOEXPAND=FALSE
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+
+    -h|--help)
+      usage
+      ;;
+
+    -i|--initial)
+      OIFS=${IFS}
+      IFS=','
+      INITIAL=($2)
+      IFS=${OIFS}
+      IMGNAME=${INITIAL[0]}
+      IMGSIZE=${INITIAL[1]}
+      IMGINCR=${INITIAL[2]}
+      shift 2
+      ;;
+
+    -n|--noexpand)
+      NOEXPAND=TRUE
+      shift
+      ;;
+
+    -o|--options)
+      OIFS=${IFS}
+      IFS=','
+      OPTIONS=($2)
+      IFS=${OIFS}
+      shift 2
+      ;;
+
+    -*|--*)
+      usage
+      ;;
+
+    *)
+      IMGFILE="$1"
+      shift
+      ;;
+
+  esac
+done
+
 if [ "${IMGFILE}" = "" ]; then
-  while :
-  do
-    echo ""
-    read -r -e -i "${IMGFILE}" -p "Image file to create? " IMGFILE
-    if [ "${IMGFILE}" = "" ]; then
-      continue
-    elif [[ ! "${IMGFILE}" =~ ^/mnt/.*$ && ! "${IMGFILE}" =~ ^/media/.*$ ]]; then
-      echo ""
-      echo "${IMGFILE} does not begin with /mnt/ or /media/"
-      continue
+  if [ "${IMGNAME}" != "" ]; then
+    IMGFILE="${IMGNAME}"
+    if [[ ! "${IMGFILE}" =~ ^/mnt/.*$ && ! "${IMGFILE}" =~ ^/media/.*$ ]]; then
+      errexit "${IMGFILE} does not begin with /mnt/ or /media/"
     fi
     if [ -d "${IMGFILE}" ]; then
+      errexit "${IMGFILE} is a directory"
+    fi
+    if [ "${IMGSIZE}" = "" ]; then
+      IMGSIZE=${INISIZE}
+    fi
+    IRFSSIZE=${IMGSIZE}
+    if [ "${IMGINCR}" = "" ]; then
+      IMGINCR=0
+    fi
+    ADDMB=${IMGINCR}
+  else
+    while :
+    do
       echo ""
-      echo "${IMGFILE} is a directory"
-    elif [ -f "${IMGFILE}" ]; then
-      echo ""
-      echo -n "${IMGFILE} already exists, Ok to delete (y/n)? "
-      while read -r -n 1 -s answer; do
-        if [[ "${answer}" = [yYnN] ]]; then
-          echo "${answer}"
-          if [[ "${answer}" = [yY] ]]; then
-            break 2
-          else
-            break 1
+      read -r -e -i "${IMGFILE}" -p "Image file to create? " IMGFILE
+      if [ "${IMGFILE}" = "" ]; then
+        continue
+      elif [[ ! "${IMGFILE}" =~ ^/mnt/.*$ && ! "${IMGFILE}" =~ ^/media/.*$ ]]; then
+        echo ""
+        echo "${IMGFILE} does not begin with /mnt/ or /media/"
+        continue
+      fi
+      if [ -d "${IMGFILE}" ]; then
+        echo ""
+        echo "${IMGFILE} is a directory"
+      elif [ -f "${IMGFILE}" ]; then
+        echo ""
+        echo -n "${IMGFILE} already exists, Ok to delete (y/n)? "
+        while read -r -n 1 -s answer; do
+          if [[ "${answer}" = [yYnN] ]]; then
+            echo "${answer}"
+            if [[ "${answer}" = [yY] ]]; then
+              break 2
+            else
+              break 1
+            fi
           fi
-        fi
-      done
-    else
-      break
-    fi
-  done
-  echo ""
-  read -r -e -p "Initial image file ROOT filesystem size (MB) [${INISIZE}]? " IRFSSIZE
-  if [ "${IRFSSIZE}" = "" ]; then
-    IRFSSIZE=${INISIZE}
-  fi
-  if [ "${ROOT_TYPE}" != "f2fs" ]; then
-    echo ""
-    read -r -e -p "Added space for incremental updates after shrinking (MB) [0]? " ADDMB
-    if [ "${ADDMB}" = "" ]; then
-      ADDMB=0
-    fi
-  fi
-  echo ""
-  echo -n "Create ${IMGFILE} (y/n)? "
-  while read -r -n 1 -s answer; do
-    if [[ "${answer}" = [yYnN] ]]; then
-      echo "${answer}"
-      if [[ "${answer}" = [yY] ]]; then
-        break
+        done
       else
-        errexit "Aborted"
+        break
+      fi
+    done
+    echo ""
+    read -r -e -p "Initial image file ROOT filesystem size (MB) [${INISIZE}]? " IRFSSIZE
+    if [ "${IRFSSIZE}" = "" ]; then
+      IRFSSIZE=${INISIZE}
+    fi
+    if [ "${ROOT_TYPE}" != "f2fs" ]; then
+      echo ""
+      read -r -e -p "Added space for incremental updates after shrinking (MB) [0]? " ADDMB
+      if [ "${ADDMB}" = "" ]; then
+        ADDMB=0
       fi
     fi
-  done
+    echo ""
+    echo -n "Create ${IMGFILE} (y/n)? "
+    while read -r -n 1 -s answer; do
+      if [[ "${answer}" = [yYnN] ]]; then
+        echo "${answer}"
+        if [[ "${answer}" = [yY] ]]; then
+          break
+        else
+          errexit "Aborted"
+        fi
+      fi
+    done
+  fi
   if [ -f "${IMGFILE}" ]; then
     rm "${IMGFILE}"
     if [ $? -ne 0 ]; then
@@ -329,28 +412,21 @@ r
 p
 w
 EOF
-  mntimg
-  mkdir "${MNTPATH}/dev/" "${MNTPATH}/media/" "${MNTPATH}/mnt/" "${MNTPATH}/proc/" "${MNTPATH}/run/" "${MNTPATH}/sys/" "${MNTPATH}/tmp/"
-  if [ $? -ne 0 ]; then
-    errexit "Unable to create image directories"
-  fi
-  chmod a+rwxt "${MNTPATH}/tmp/"
-  umntimg
   echo ""
   echo "Starting full backup (for incremental backups, run: $0 ${IMGFILE})"
   backup
   if [ "${ROOT_TYPE}" != "f2fs" ]; then
     echo ""
     mkloop2
-    e2fsck -f "${LOOP2}"
+    e2fsck -f -n "${LOOP2}"
     if [ $? -ne 0 ]; then
       fsckerr "before"
     fi
     echo ""
-    resize2fs -M "${LOOP2}"
-    resize2fs -M "${LOOP2}"
-    resize2fs -M "${LOOP2}"
-    e2fsck -f "${LOOP2}"
+    resize2fs -f -M "${LOOP2}"
+    resize2fs -f -M "${LOOP2}"
+    resize2fs -f -M "${LOOP2}"
+    e2fsck -f -n "${LOOP2}"
     if [ $? -ne 0 ]; then
       fsckerr "after"
     fi
@@ -375,13 +451,13 @@ EOF
     if [ ${ADDMB} -ne 0 ]; then
       echo ""
       mkloop2
-      e2fsck -f "${LOOP2}"
+      e2fsck -f -n "${LOOP2}"
       if [ $? -ne 0 ]; then
         fsckerr "before"
       fi
       echo ""
-      resize2fs "${LOOP2}"
-      e2fsck -f "${LOOP2}"
+      resize2fs -f "${LOOP2}"
+      e2fsck -f -n "${LOOP2}"
       if [ $? -ne 0 ]; then
         fsckerr "after"
       fi
