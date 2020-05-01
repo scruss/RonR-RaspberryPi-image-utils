@@ -2,7 +2,7 @@
 
 trap '{ stty sane; echo ""; errexit "Aborted"; }' SIGINT SIGTERM
 
-MNTPATH="/tmp/img-compare-mnt"
+MNTPATH="/tmp/img-info-mnt"
 
 mkloop()
 {
@@ -86,10 +86,6 @@ for PID in $(pidof -x -o %PPID "${PGMNAME}"); do
     errexit "${PGMNAME} is already running"
   fi
 done
-rsync --version &> /dev/null
-if [ $? -ne 0 ]; then
-  errexit "rsync not installed (run: apt-get install rsync)"
-fi
 IMGFILE="$1"
 FLAG=0
 while :
@@ -98,7 +94,7 @@ do
     while :
     do
       echo ""
-      read -r -e -i "${IMGFILE}" -p "Image file to compare? " IMGFILE
+      read -r -e -i "${IMGFILE}" -p "Image file name? " IMGFILE
       if [ "${IMGFILE}" = "" ]; then
         continue
       elif [ -d "${IMGFILE}" ]; then
@@ -119,14 +115,16 @@ do
   fi
 done
 mntimg
-sync
 echo ""
-rsync -aDH --dry-run --itemize-changes --partial --numeric-ids --delete --force --exclude "${MNTPATH}" --exclude '/dev' --exclude '/media' --exclude '/mnt' \
---exclude '/proc' --exclude '/run' --exclude '/sys' --exclude '/tmp' --exclude '/lost+found' --exclude '/etc/udev/rules.d/70-persistent-net.rules' \
---exclude '/var/lib/asterisk/astdb.sqlite3-journal' / "${MNTPATH}/"
-if [ $? -ne 0 ]; then
-  errexit "Unable to compare backup"
-fi
+ls -l "${IMGFILE}"
 echo ""
-sync
+INFO="$(df -T)"
+echo "$(sed -n 's|^\(.*\)\s*Mounted on.*|\1|p' <<< ${INFO})"
+echo "$(sed -n "s|^${LOOP}p1\(.*\)${MNTPATH}.*|boot        \1|p" <<< ${INFO})"
+echo "$(sed -n "s|^${LOOP}p2\(.*\)${MNTPATH}.*|root        \1|p" <<< ${INFO})"
+echo ""
+echo "$(blkid ${LOOP} | sed -n "s|^${LOOP}:\s*\(.*\).*|disk: \1|p")"
+echo "$(blkid ${LOOP}p1 | sed -n "s|^${LOOP}p1:\s*\(.*\).*|boot: \1|p")"
+echo "$(blkid ${LOOP}p2 | sed -n "s|^${LOOP}p2:\s*\(.*\).*|root: \1|p")"
+echo""
 umntimg

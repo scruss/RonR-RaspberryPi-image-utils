@@ -1,0 +1,212 @@
+#!/bin/bash
+
+trap '{ stty sane; echo ""; errexit "Aborted"; }' SIGINT SIGTERM
+
+MNTPATH="/tmp/img-set-partuuid-mnt"
+
+mkloop()
+{
+  LOOP="$(losetup -f --show -P "${IMGFILE}")"
+  if [ $? -ne 0 ]; then
+    errexit "Unable to create loop device"
+  fi
+}
+
+rmloop()
+{
+  if [ "${LOOP}" != "" ]; then
+    losetup -d "${LOOP}"
+    LOOP="" 
+ fi
+}
+
+mntimg()
+{
+  MNTED=TRUE
+  mkloop
+  if [ ! -d "${MNTPATH}/" ]; then
+    mkdir "${MNTPATH}/"
+    if [ $? -ne 0 ]; then
+      errexit "Unable to make ROOT partition mount point"
+    fi
+  fi
+  mount "${LOOP}p2" "${MNTPATH}/"
+  if [ $? -ne 0 ]; then
+    errexit "Unable to mount image ROOT partition"
+  fi
+  if [ ! -d "${MNTPATH}/boot/" ]; then
+    mkdir -p "${MNTPATH}/boot/"
+    if [ $? -ne 0 ]; then
+      errexit "Unable to make BOOT partition mount point"
+    fi
+  fi
+  mount "${LOOP}p1" "${MNTPATH}/boot/"
+  if [ $? -ne 0 ]; then
+    errexit "Unable to mount image BOOT partition"
+  fi
+}
+
+umntimg()
+{
+  umount "${MNTPATH}/boot/"
+  if [ $? -ne 0 ]; then
+    errexit "Unable to unmount image BOOT partition"
+  fi
+  umount "${MNTPATH}/"
+  if [ $? -ne 0 ]; then
+    errexit "Unable to unmount image ROOT partition"
+  fi
+  rmloop
+  rm -rf "${MNTPATH}/"
+  MNTED=FALSE
+}
+
+errexit()
+{
+  echo ""
+  echo "$1"
+  echo ""
+  if [ "${MNTED}" = "TRUE" ]; then
+    umount "${MNTPATH}/boot/" &> /dev/null
+    umount "${MNTPATH}/" &> /dev/null
+    rm -rf "${MNTPATH}/" &> /dev/null
+  fi
+  rmloop
+  exit 1
+}
+
+LOOP=""
+MNTED=FALSE
+if [ $(id -u) -ne 0 ]; then
+  errexit "$0 must be run as root user"
+fi
+PGMNAME="$(basename $0)"
+for PID in $(pidof -x -o %PPID "${PGMNAME}"); do
+  if [ ${PID} -ne $$ ]; then
+    errexit "${PGMNAME} is already running"
+  fi
+done
+gdisk -l "${DEVICE}" &> /dev/null
+if [ $? -eq 127 ]; then
+  echo ""
+  echo "gdisk not installed"
+  echo ""
+  echo -n "Ok to install gdisk (y/n)? "
+  while read -r -n 1 -s answer; do
+    if [[ "${answer}" = [yYnN] ]]; then
+      echo "${answer}"
+      if [[ "${answer}" = [yY] ]]; then
+        break
+      else
+        errexit "Aborted"
+      fi
+    fi
+  done
+  echo ""
+  echo "Installing gdisk"
+  echo ""
+  apt-get update
+  apt-get install gdisk
+fi
+IMGFILE="$1"
+PARTUUID="$2"
+if [ "${IMGFILE}" = "" ]; then
+  errexit "Usage: $0 imagefile [ hhhhhhhh-02 | hhhhhhhh-hhhh-hhhh-hhhh-hhhhhhhhhhhh | random ]"
+fi
+if [ ! -f "${IMGFILE}" ]; then
+  errexit "${IMGFILE} not found"
+fi
+INFO="$(sfdisk -d "${IMGFILE}")"
+PTTYPE="$(sed -n "s|^label: \(\S\+\).*$|\1|p" <<< "${INFO}")"
+if [[ "${PTTYPE}" != "dos" && "${PTTYPE}" != "gpt" ]]; then
+  errexit "Unsupported partition table type: ${PTTYPE}"
+fi
+if [ "${PTTYPE}" = "dos" ]; then
+  PTUUID="$(sed -n "s|^label-id: 0x\(\S\+\).*$|\1|p" <<< "${INFO}")"
+  ORIGUUID="${PTUUID}-02"
+  ORIGUUID_1="${PTUUID}-01"
+  ORIGUUID_2="${PTUUID}-02"
+else
+  ORIGUUID="$(sed -n "s|^${IMGFILE}2.*uuid=\(\S\+\).*$|\1|p" <<< "${INFO}")"
+  ORIGUUID_1="$(sed -n "s|^${IMGFILE}1.*uuid=\(\S\+\).*$|\1|p" <<< "${INFO}")"
+  ORIGUUID_2="$(sed -n "s|^${IMGFILE}2.*uuid=\(\S\+\).*$|\1|p" <<< "${INFO}")"
+fi
+ORIGUUID="$(tr [A-Z] [a-z] <<< "${ORIGUUID}")"
+ORIGUUID_1="$(tr [A-Z] [a-z] <<< "${ORIGUUID_1}")"
+ORIGUUID_2="$(tr [A-Z] [a-z] <<< "${ORIGUUID_2}")"
+if [ "${PARTUUID}" = "" ]; then
+  PARTUUID="${ORIGUUID}"
+else
+  PARTUUID="$(tr [A-Z] [a-z] <<< "${PARTUUID}")"
+  if [[ "${PARTUUID}" != "random" && (("${PTTYPE}" = "dos" && ! "${PARTUUID}" =~ ^[[:xdigit:]]{8}-02$) || \
+("${PTTYPE}" = "gpt" && ! "${PARTUUID}" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$)) ]]; then
+    errexit "Invalid PARTUUID: ${PARTUUID}"
+  fi
+  echo ""
+  echo -n "Set PARTUUID on ${IMGFILE} to ${PARTUUID} (y/n)? "
+  while read -r -n 1 -s answer; do
+    if [[ "${answer}" = [yYnN] ]]; then
+      echo "${answer}"
+      if [[ "${answer}" = [yY] ]]; then
+        break
+      else
+        errexit "Aborted"
+      fi
+    fi
+  done
+  echo ""
+  mkloop
+  if [ "$(blkid "${LOOP}p2" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')" = "f2fs" ]; then
+    fsck.f2fs "${LOOP}p2"
+  else
+    fsck.ext4 -f "${LOOP}p2"
+  fi
+  if [ $? -ne 0 ]; then
+    errexit "Image ROOT filesystem appears corrupted"
+  fi
+  rmloop
+  echo ""
+  if [ "${PTTYPE}" = "dos" ]; then
+    if [ "${PARTUUID}" = "random" ]; then
+      PTUUID="$(hexdump -n 4 -e '"%08X"' /dev/random | tr [A-Z] [a-z])"
+    else
+      PTUUID="${PARTUUID:0:(${#PARTUUID} - 3)}"
+    fi
+    fdisk "${IMGFILE}" <<EOF &> /dev/null
+x
+i
+0x${PTUUID}
+r
+w
+EOF
+  else
+    if [ "${PARTUUID}" = "random" ]; then
+      sgdisk -u 2:'R' "${IMGFILE}" > /dev/null
+    else
+      sgdisk -u 2:${PARTUUID} "${IMGFILE}" > /dev/null
+    fi
+  fi
+  partprobe
+  INFO="$(sfdisk -d "${IMGFILE}")"
+  if [ "${PTTYPE}" = "dos" ]; then
+    PTUUID="$(sed -n "s|^label-id: 0x\(\S\+\).*$|\1|p" <<< "${INFO}")"
+    PARTUUID="${PTUUID}-02"
+    PARTUUID_1="${PTUUID}-01"
+    PARTUUID_2="${PTUUID}-02"
+  else
+    PARTUUID="$(sed -n "s|^${IMGFILE}2.*uuid=\(\S\+\).*$|\1|p" <<< "${INFO}")"
+    PARTUUID_1="$(sed -n "s|^${IMGFILE}1.*uuid=\(\S\+\).*$|\1|p" <<< "${INFO}")"
+    PARTUUID_2="$(sed -n "s|^${IMGFILE}2.*uuid=\(\S\+\).*$|\1|p" <<< "${INFO}")"
+  fi
+  PARTUUID="$(tr [A-Z] [a-z] <<< "${PARTUUID}")"
+  PARTUUID_1="$(tr [A-Z] [a-z] <<< "${PARTUUID_1}")"
+  PARTUUID_2="$(tr [A-Z] [a-z] <<< "${PARTUUID_2}")"
+  mntimg
+  sed -i "/^[[:space:]]*#/!s|^\(PARTUUID=\)${ORIGUUID_1}\(\s\+/boot\s\+.*\)$|\1${PARTUUID_1}\2|" "${MNTPATH}/etc/fstab"
+  sed -i "/^[[:space:]]*#/!s|^\(PARTUUID=\)${ORIGUUID_2}\(\s\+/\s\+.*\)$|\1${PARTUUID_2}\2|" "${MNTPATH}/etc/fstab"
+  sed -i "/^[[:space:]]*#/!s|^\(.*root=PARTUUID=\)${ORIGUUID_2}\(\s\+.*\)$|\1${PARTUUID_2}\2|" "${MNTPATH}/boot/cmdline.txt"
+  umntimg
+fi
+echo ""
+echo "PARTUUID on ${IMGFILE} is set to ${PARTUUID}"
+echo ""

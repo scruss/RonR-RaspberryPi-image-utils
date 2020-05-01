@@ -2,76 +2,37 @@
 
 trap '{ stty sane; echo ""; errexit "Aborted"; }' SIGINT SIGTERM
 
-BOOTBEG=8192
-BOOTEND=532480
-ROOTBEG=540672
-
 MNTPATH="/tmp/img-backup-mnt"
 
 ONEMB=$((1024 * 1024))
 
-mkloop1()
+mkloop()
 {
-  local INFO1=""
-  local SIZE1=0
-  local START1=0
-
-  sync
-  INFO1="$(sfdisk -d "${IMGFILE}")"
-  START1=$(grep type=c <<< "${INFO1}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
-  SIZE1=$(grep type=c <<< "${INFO1}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
-  LOOP1="$(losetup -f --show -o $((${START1} * 512)) --sizelimit $((${SIZE1} * 512)) "${IMGFILE}")"
+  LOOP="$(losetup -f --show -P "${IMGFILE}")"
   if [ $? -ne 0 ]; then
-    errexit "Unable to create BOOT loop device"
+    errexit "Unable to create loop device"
   fi
 }
 
-rmloop1()
+rmloop()
 {
-  if [ "${LOOP1}" != "" ]; then
-    sync
-    losetup -d "${LOOP1}"
-    LOOP1="" 
- fi
-}
-
-mkloop2()
-{
-  local INFO2=""
-  local SIZE2=0
-  local START2=0
-
-  sync
-  INFO2="$(sfdisk -d "${IMGFILE}")"
-  START2=$(grep type=83 <<< "${INFO2}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
-  SIZE2=$(grep type=83 <<< "${INFO2}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
-  LOOP2="$(losetup -f --show -o $((${START2} * 512)) --sizelimit $((${SIZE2} * 512)) "${IMGFILE}")"
-  if [ $? -ne 0 ]; then
-    errexit "Unable to create ROOT loop device"
-  fi
-  START=${START2}
-}
-
-rmloop2()
-{
-  if [ "${LOOP2}" != "" ]; then
-    sync
-    losetup -d "${LOOP2}"
-    LOOP2="" 
+  if [ "${LOOP}" != "" ]; then
+    losetup -d "${LOOP}"
+    LOOP="" 
   fi
 }
 
 mntimg()
 {
   MNTED=TRUE
+  mkloop
   if [ ! -d "${MNTPATH}/" ]; then
     mkdir "${MNTPATH}/"
     if [ $? -ne 0 ]; then
       errexit "Unable to make ROOT partition mount point"
     fi
   fi
-  mkloop2
-  mount "${LOOP2}" "${MNTPATH}/"
+  mount "${LOOP}p2" "${MNTPATH}/"
   if [ $? -ne 0 ]; then
     errexit "Unable to mount image ROOT partition"
   fi
@@ -81,8 +42,7 @@ mntimg()
       errexit "Unable to make BOOT partition mount point"
     fi
   fi
-  mkloop1
-  mount "${LOOP1}" "${MNTPATH}/boot/"
+  mount "${LOOP}p1" "${MNTPATH}/boot/"
   if [ $? -ne 0 ]; then
     errexit "Unable to mount image BOOT partition"
   fi
@@ -94,12 +54,11 @@ umntimg()
   if [ $? -ne 0 ]; then
     errexit "Unable to unmount image BOOT partition"
   fi
-  rmloop1
   umount "${MNTPATH}/"
   if [ $? -ne 0 ]; then
     errexit "Unable to unmount image ROOT partition"
   fi
-  rmloop2
+  rmloop
   rm -r "${MNTPATH}/"
   MNTED=FALSE
 }
@@ -114,8 +73,7 @@ errexit()
     umount "${MNTPATH}/" &> /dev/null
     rm -rf "${MNTPATH}/" &> /dev/null
   fi
-  rmloop1
-  rmloop2
+  rmloop
   exit 1
 }
 
@@ -148,94 +106,126 @@ backup()
     errexit "Unable to create image directories"
   fi
   chmod a+rwxt "${MNTPATH}/tmp/"
-  if [ "${NOEXPAND}" = "FALSE" ]; then
-    if [[ $(grep -v '^[[:space:]]*#' "${MNTPATH}/etc/rc.local" | grep -c 'resize-root-fs') -eq 0 && "${ROOT_TYPE}" != "f2fs" ]]; then
-      cat <<\EOF > "${MNTPATH}/etc/resize-root-fs"
+  if [[ "${NOEXPAND}" = "FALSE" && "${ROOT_TYPE}" != "f2fs" && $(grep -v '^[[:space:]]*#' "${MNTPATH}/etc/rc.local" | grep -c 'resize-root-fs') -eq 0 ]]; then
+    cat <<\EOF1 > "${MNTPATH}/etc/resize-root-fs"
 #!/bin/bash
 
-cp /usr/bin/raspi-config /tmp/raspi-config
-ROOT_PART="$(mount | sed -n 's|^/dev/\(.*\) on / .*|\1|p')"
-if [ "${ROOT_PART}" != "mmcblk0p2" ]; then
-  ROOT_DEV="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
-  sed -i -E "s/mmcblk0p?/${ROOT_DEV}/" /tmp/raspi-config
-  sed -i 's|    resize2fs /dev/$ROOT_PART &&|    ROOT_DEV=\\$(findmnt / -o source -n) \&\&\n    resize2fs \\$ROOT_DEV \&\&|' /tmp/raspi-config
+ROOT_PART="$(mount | sed -n 's|^\(/dev/.*\) on / .*|\1|p')"
+ROOT_DEV="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
+if [ "${ROOT_DEV}" = "/dev/mmcblk0p" ]; then
+  ROOT_DEV="${ROOT_DEV:0:(${#ROOT_DEV} - 1)}"
 fi
-/tmp/raspi-config --expand-rootfs &> /dev/null
-rm /tmp/raspi-config
+START=$(sfdisk -d "${ROOT_DEV}" | sed -n "s|^${ROOT_PART}.*start=\s*\([0-9]\+\).*$|\1|p")
+PTTYPE="$(blkid "${ROOT_DEV}" | sed -n 's|^.*PTTYPE="\(\S\+\)".*|\1|p')"
+if [ "${PTTYPE}" = "dos" ]; then
+  sfdisk --delete "${ROOT_DEV}" 2 > /dev/null
+  echo "${START},+" | sfdisk --no-reread --no-tell-kernel -N2 "${ROOT_DEV}" &> /dev/null
+else
+  PARTUUID="$(blkid "${ROOT_PART}" | sed -n 's|^.*PARTUUID="\(\S\+\)".*|\1|p')"
+  sgdisk -d 2 "${ROOT_DEV}" > /dev/null
+  sgdisk -n 2:${START}:0 "${ROOT_DEV}" > /dev/null
+  sgdisk -u 2:${PARTUUID} "${ROOT_DEV}" > /dev/null
+fi
+cat <<\EOF2 > /etc/init.d/resize_root_fs
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides: resize_root_fs
+# Required-Start:
+# Required-Stop:
+# Default-Start: 3
+# Default-Stop:
+# Short-Description: Resize root filesystem
+# Description:
+### END INIT INFO
+
+case "$1" in
+  start)
+    resize2fs "$(mount | sed -n 's|^\(/dev/.*\) on / .*|\1|p')"
+    update-rc.d resize_root_fs remove
+    rm /etc/init.d/resize_root_fs
+    ;;
+  *)
+    exit 3
+    ;;
+esac
+EOF2
+chmod +x /etc/init.d/resize_root_fs
+update-rc.d resize_root_fs defaults
 sed -i '/resize-root-fs/d' /etc/rc.local
 rm /etc/resize-root-fs
 shutdown --no-wall -r now
-exit 0
-EOF
-      chmod +x "${MNTPATH}/etc/resize-root-fs"
-      sed -i 's|^exit 0$|/etc/resize-root-fs\nexit 0|' "${MNTPATH}/etc/rc.local"
-    fi
+EOF1
+    chmod +x "${MNTPATH}/etc/resize-root-fs"
+    sed -i 's|^exit 0$|/etc/resize-root-fs\nexit 0|' "${MNTPATH}/etc/rc.local"
   fi
   sync
   umntimg
 }
 
-LOOP1=""
-LOOP2=""
+LOOP=""
 MNTED=FALSE
-
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
 if [ $(id -u) -ne 0 ]; then
   errexit "$0 must be run as root user"
 fi
-
 PGMNAME="$(basename $0)"
 for PID in $(pidof -x -o %PPID "${PGMNAME}"); do
   if [ ${PID} -ne $$ ]; then
     errexit "${PGMNAME} is already running"
   fi
 done
-
+gdisk -l "${DEVICE}" &> /dev/null
+if [ $? -eq 127 ]; then
+  echo ""
+  echo "gdisk not installed"
+  echo ""
+  echo -n "Ok to install gdisk (y/n)? "
+  while read -r -n 1 -s answer; do
+    if [[ "${answer}" = [yYnN] ]]; then
+      echo "${answer}"
+      if [[ "${answer}" = [yY] ]]; then
+        break
+      else
+        errexit "Aborted"
+      fi
+    fi
+  done
+  echo ""
+  echo "Installing gdisk"
+  echo ""
+  apt-get update
+  apt-get install gdisk
+fi
 rsync --version &> /dev/null
 if [ $? -ne 0 ]; then
   errexit "rsync not installed (run: apt-get install rsync)"
 fi
-
-if command -v systemctl > /dev/null && systemctl | grep -q '\-\.mount'; then
-  SYSTEMD=1
-elif [ -f /etc/init.d/cron ] && [ ! -h /etc/init.d/cron ]; then
-  SYSTEMD=0
-else
-  errexit "Unrecognized init system"
-fi
-
-if [ ${SYSTEMD} -eq 1 ]; then
-  ROOT_PART="$(mount | sed -n 's|^/dev/\(.*\) on / .*|\1|p')"
-else
-  if [ ! -h /dev/root ]; then
-    errexit "/dev/root does not exist or is not a symlink"
-  fi
-  ROOT_PART="$(readlink /dev/root)"
-fi
-
-ROOT_TYPE=$(blkid "/dev/${ROOT_PART}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
-
+ROOT_PART="$(mount | sed -n 's|^\(/dev/.*\) on / .*|\1|p')"
+ROOT_TYPE=$(blkid "${ROOT_PART}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
+ROOT_DEV_P="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
 ROOT_DEV="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
-if [ "${ROOT_DEV}" = "mmcblk0p" ]; then
+if [ "${ROOT_DEV}" = "/dev/mmcblk0p" ]; then
   ROOT_DEV="${ROOT_DEV:0:(${#ROOT_DEV} - 1)}"
 fi
-
-PTUUID="$(blkid "/dev/${ROOT_DEV}" | sed -n 's|^.*PTUUID="\(\S\+\)".*|\1|p')"
-
-INFO="$(df | grep "% /$")"
-DFKSIZE=$(awk '{print $2}' <<< "${INFO}")
-DFKFREE=$(awk '{print $4}' <<< "${INFO}")
-INISIZE=$(((${DFKSIZE} - ${DFKFREE}) / 1024))
-BLKSIZE=$(blockdev --getbsz "/dev/${ROOT_PART}")
-
+PTTYPE="$(blkid "${ROOT_DEV}" | sed -n 's|^.*PTTYPE="\(\S\+\)".*|\1|p')"
+if [[ "${PTTYPE}" != "dos" && "${PTTYPE}" != "gpt" ]]; then
+  errexit "Unsupported partition table type: ${PTTYPE}"
+fi
+PARTUUID_1="$(blkid "${ROOT_DEV_P}1" | sed -n 's|^.*PARTUUID="\(\S\+\)".*|\1|p')"
+PARTUUID_2="$(blkid "${ROOT_DEV_P}2" | sed -n 's|^.*PARTUUID="\(\S\+\)".*|\1|p')"
+PTUUID="$(blkid "${ROOT_DEV}" | sed -n 's|^.*PTUUID="\(\S\+\)".*|\1|p')"
+INFO="$(tune2fs -l "${ROOT_PART}")"
+BLKCOUNT=$(sed -n 's|^Block count:\s*\(.*\)|\1|p' <<< "${INFO}")
+BLKFREE=$(sed -n 's|^Free blocks:\s*\(.*\)|\1|p' <<< "${INFO}")
+BLKSIZE=$(sed -n 's|^Block size:\s*\(.*\)|\1|p' <<< "${INFO}")
+BLKUSED=$((${BLKCOUNT} - ${BLKFREE}))
+INISIZE=$((((${BLKUSED} + (${BLKUSED} / 10)) * ${BLKSIZE}) / ${ONEMB}))
 IMGNAME=""
 IMGSIZE=""
 IMGINCR=""
 IMGFILE=""
 OPTIONS=()
 NOEXPAND=FALSE
-
 while [ $# -gt 0 ]; do
   case "$1" in
 
@@ -278,7 +268,6 @@ while [ $# -gt 0 ]; do
 
   esac
 done
-
 if [ "${IMGFILE}" = "" ]; then
   if [ "${IMGNAME}" != "" ]; then
     IMGFILE="${IMGNAME}"
@@ -359,109 +348,125 @@ if [ "${IMGFILE}" = "" ]; then
       errexit "Unable to delete existing image file"
     fi
   fi
-  ROOTEND=$((${ROOTBEG} + ((${IRFSSIZE} * ${ONEMB}) / 512) - 1))
-  truncate -s $(((${ROOTEND} + 1) * 512)) "${IMGFILE}"
+  truncate -s $(((${IRFSSIZE} + 256) * ${ONEMB})) "${IMGFILE}"
   if [ $? -ne 0 ]; then
     errexit "Unable to create image file"
   fi
-  sync
-  fdisk "${IMGFILE}" <<EOF > /dev/null
-p
-n
-p
-1
-${BOOTBEG}
-${BOOTEND}
-t
-c
-p
-n
-p
-2
-${ROOTBEG}
-${ROOTEND}
-p
-w
+  if [ "${PTTYPE}" = "dos" ]; then
+    echo "label: dos" | sfdisk "${IMGFILE}" > /dev/null
+    sfdisk "${IMGFILE}" <<EOF > /dev/null
+,256MiB,c
+,+,83
 EOF
-  mkloop1
-  mkloop2
-  mkfs.vfat "${LOOP1}" > /dev/null
+  else
+    sgdisk -Z "${IMGFILE}" &> /dev/null
+    sgdisk -n 1:0:+256M "${IMGFILE}" > /dev/null
+    sgdisk -t 1:0700 "${IMGFILE}" > /dev/null
+    sgdisk -n 2:0:0 "${IMGFILE}" > /dev/null
+    sgdisk -t 2:8300 "${IMGFILE}" > /dev/null
+    gdisk "${IMGFILE}" <<EOF > /dev/null
+r
+h
+1
+n
+0c
+n
+n
+w
+y
+EOF
+  fi
+  mkloop
+  mkfs.vfat "${LOOP}p1" > /dev/null
   if [ $? -ne 0 ]; then
     errexit "Unable to create image BOOT filesystem"
   fi
-  dosfsck "${LOOP1}" > /dev/null
+  dosfsck "${LOOP}p1" > /dev/null
   if [ $? -ne 0 ]; then
     errexit "Image BOOT filesystem appears corrupted"
   fi
   if [ "${ROOT_TYPE}" = "f2fs" ]; then
-    mkfs.f2fs "${LOOP2}" > /dev/null
+    mkfs.f2fs "${LOOP}p2" > /dev/null
   else
-    mkfs.ext4 -q -b ${BLKSIZE} "${LOOP2}" > /dev/null
+    mkfs.ext4 -q -b 4096 "${LOOP}p2" > /dev/null
   fi
   if [ $? -ne 0 ]; then
     errexit "Unable to create image ROOT filesystem"
   fi
-  rmloop2
-  rmloop1
-  fdisk "${IMGFILE}" <<EOF > /dev/null
-p
-x
-i
-0x${PTUUID}
-r
-p
-w
-EOF
+  rmloop
   echo ""
   echo "Starting full backup (for incremental backups, run: $0 ${IMGFILE})"
   backup
   if [ "${ROOT_TYPE}" != "f2fs" ]; then
     echo ""
-    mkloop2
-    e2fsck -f -n "${LOOP2}"
+    mkloop
+    e2fsck -f -n "${LOOP}p2"
     if [ $? -ne 0 ]; then
       fsckerr "before"
     fi
     echo ""
-    resize2fs -f -M "${LOOP2}"
-    resize2fs -f -M "${LOOP2}"
-    resize2fs -f -M "${LOOP2}"
-    e2fsck -f -n "${LOOP2}"
+    resize2fs -f -M "${LOOP}p2"
+    resize2fs -f -M "${LOOP}p2"
+    resize2fs -f -M "${LOOP}p2"
+    e2fsck -f -n "${LOOP}p2"
     if [ $? -ne 0 ]; then
       fsckerr "after"
     fi
-    INFO="$(tune2fs -l "${LOOP2}" 2>/dev/null)"
-    rmloop2
-    NEWSIZE=$(grep '^Block count:' <<< "${INFO}" | awk '{print $3}')
-    BLKSIZE=$(grep '^Block size:' <<< "${INFO}" | awk '{print $3}')
+    INFO="$(tune2fs -l "${LOOP}p2" 2>/dev/null)"
+    rmloop
+    NEWSIZE=$(sed -n 's|^Block count:\s*\(.*\)|\1|p' <<< "${INFO}")
+    BLKSIZE=$(sed -n 's|^Block size:\s*\(.*\)|\1|p' <<< "${INFO}")
+    START=$(sfdisk -d ${IMGFILE} | sed -n "s|^${IMGFILE}2.*start=\s*\([0-9]\+\).*$|\1|p")
     NEWEND=$((${START} + (${NEWSIZE} * (${BLKSIZE} / 512)) + ((${ADDMB} * ${ONEMB}) / 512) - 1))
+    if [ "${PTTYPE}" = "gpt" ]; then
+      ((NEWEND += 33))
+    fi
     truncate -s $(((${NEWEND} + 1) * 512)) "${IMGFILE}"
-    fdisk "${IMGFILE}" <<EOF > /dev/null
-p
-d
-2
-n
-p
-2
-${START}
-${NEWEND}
-p
+    if [ "${PTTYPE}" = "dos" ]; then
+      sfdisk --delete "${IMGFILE}" 2 > /dev/null
+      echo "${START},+" | sfdisk -N2 "${IMGFILE}" &> /dev/null
+      fdisk "${IMGFILE}" <<EOF > /dev/null
+x
+i
+0x${PTUUID}
+r
 w
 EOF
+    else
+      sgdisk -Z "${IMGFILE}" &> /dev/null
+      sgdisk -n 1:0:+256M "${IMGFILE}" > /dev/null
+      sgdisk -t 1:0700 "${IMGFILE}" > /dev/null
+      sgdisk -n 2:0:0 "${IMGFILE}" > /dev/null
+      sgdisk -t 2:8300 "${IMGFILE}" > /dev/null
+      sgdisk -u 1:"${PARTUUID_1}" "${IMGFILE}" > /dev/null
+      sgdisk -u 2:"${PARTUUID_2}" "${IMGFILE}" > /dev/null
+      sgdisk -U "${PTUUID}" "${IMGFILE}" > /dev/null
+      gdisk "${IMGFILE}" <<EOF > /dev/null
+r
+h
+1
+n
+0c
+n
+n
+w
+y
+EOF
+    fi
     if [ ${ADDMB} -ne 0 ]; then
       echo ""
-      mkloop2
-      e2fsck -f -n "${LOOP2}"
+      mkloop
+      e2fsck -f -n "${LOOP}p2"
       if [ $? -ne 0 ]; then
         fsckerr "before"
       fi
       echo ""
-      resize2fs -f "${LOOP2}"
-      e2fsck -f -n "${LOOP2}"
+      resize2fs -f "${LOOP}p2"
+      e2fsck -f -n "${LOOP}p2"
       if [ $? -ne 0 ]; then
         fsckerr "after"
       fi
-      rmloop2
+      rmloop
     fi
   fi
   backup

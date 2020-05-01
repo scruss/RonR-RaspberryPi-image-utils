@@ -16,33 +16,34 @@ usage()
 if [ $(id -u) -ne 0 ]; then
   errexit "$0 must be run as root user"
 fi
-
-IMG="$1"
+PGMNAME="$(basename $0)"
+for PID in $(pidof -x -o %PPID "${PGMNAME}"); do
+  if [ ${PID} -ne $$ ]; then
+    errexit "${PGMNAME} is already running"
+  fi
+done
+IMGFILE="$1"
 PART="$2"
-
-if [ "${IMG}" = "" ]; then
+if [ "${IMGFILE}" = "" ]; then
   usage
 fi
-
-if [ ! -f "${IMG}" ]; then
-  errexit "${IMG} not found"
+if [ ! -f "${IMGFILE}" ]; then
+  errexit "${IMGFILE} not found"
 fi
-
 if [ "${PART}" = "" ]; then
-  PART="type=83"
+  PART="2"
 else
   PART="$(tr [A-Z] [a-z] <<< "${PART}")"
   if [ "${PART}" = "w95" ];then
-    PART="type=c"
+    PART="1"
   elif [ "${PART}" = "linux" ];then
-    PART="type=83"
+    PART="2"
   else
     usage
   fi
 fi
-
 echo ""
-echo -n "Check ${IMG} (y/n)? "
+echo -n "Check ${IMGFILE} (y/n)? "
 while read -r -n 1 -s answer; do
   if [[ "${answer}" = [yYnN] ]]; then
     echo "${answer}"
@@ -54,22 +55,18 @@ while read -r -n 1 -s answer; do
   fi
 done
 echo ""
-
-INFO="$(sfdisk -d "${IMG}")"
-START=$(grep "${PART}" <<< "${INFO}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
-SIZE=$(grep "${PART}" <<< "${INFO}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
-LOOP="$(losetup -f --show -o $((${START} * 512)) --sizelimit $((${SIZE} * 512)) "${IMG}")"
+LOOP="$(losetup -f --show -P "${IMGFILE}")"
 if [ $? -ne 0 ]; then
-  errexit "Unable to create BOOT loop device"
+  errexit "Unable to create loop device"
 fi
-FS_TYPE=$(blkid "${LOOP}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
-if [ "${PART}" = "type=c" ]; then
-  dosfsck "${LOOP}"
+FS_TYPE=$(blkid "${LOOP}p${PART}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
+if [ "${PART}" = "1" ]; then
+  dosfsck "${LOOP}p${PART}"
 else
   if [ "${FS_TYPE}" = "f2fs" ]; then
-    fsck.f2fs "${LOOP}"
+    fsck.f2fs "${LOOP}p${PART}"
   else
-    fsck.ext4 -f "${LOOP}"
+    fsck.ext4 -f "${LOOP}p${PART}"
   fi
 fi
 if [ $? -ne 0 ]; then
@@ -78,7 +75,7 @@ if [ $? -ne 0 ]; then
 fi
 if [ "${FS_TYPE}" = "ext4" ]; then
   echo ""
-  INFO="$(tune2fs -l "${LOOP}" 2>/dev/null)"
+  INFO="$(tune2fs -l "${LOOP}p${PART}" 2>/dev/null)"
   echo "${INFO}"
 fi
 losetup -d "${LOOP}"

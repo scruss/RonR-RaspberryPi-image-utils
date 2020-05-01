@@ -16,38 +16,38 @@ usage()
 if [ $(id -u) -ne 0 ]; then
   errexit "$0 must be run as root user"
 fi
-
-IMG="$1"
+PGMNAME="$(basename $0)"
+for PID in $(pidof -x -o %PPID "${PGMNAME}"); do
+  if [ ${PID} -ne $$ ]; then
+    errexit "${PGMNAME} is already running"
+  fi
+done
+IMGFILE="$1"
 MNT="$2"
 PART="$3"
-
-if [[ "${IMG}" = "" || "${MNT}" = "" ]]; then
+if [[ "${IMGFILE}" = "" || "${MNT}" = "" ]]; then
   usage
 fi
-
-if [ ! -f "${IMG}" ]; then
-  errexit "${IMG} not found"
+if [ ! -f "${IMGFILE}" ]; then
+  errexit "${IMGFILE} not found"
 fi
-
 if [ ! -d "${MNT}" ]; then
   errexit "${MNT} is not a directory"
 fi
-
 if [ "${PART}" = "" ]; then
-  PART="type=83"
+  PART="2"
 else
   PART="$(tr [A-Z] [a-z] <<< "${PART}")"
   if [ "${PART}" = "w95" ];then
-    PART="type=c"
+    PART="1"
   elif [ "${PART}" = "linux" ];then
-    PART="type=83"
+    PART="2"
   else
     usage
   fi
 fi
-
 echo ""
-echo -n "Mount ${IMG} on ${MNT} (y/n)? "
+echo -n "Mount ${IMGFILE} on ${MNT} (y/n)? "
 while read -r -n 1 -s answer; do
   if [[ "${answer}" = [yYnN] ]]; then
     echo "${answer}"
@@ -59,31 +59,27 @@ while read -r -n 1 -s answer; do
   fi
 done
 echo ""
-
-INFO="$(sfdisk -d "${IMG}")"
-START=$(grep "${PART}" <<< "${INFO}" | sed -n 's|^.*start=\s\+\([0-9]\+\).*$|\1|p')
-SIZE=$(grep "${PART}" <<< "${INFO}" | sed -n 's|^.*size=\s\+\([0-9]\+\).*$|\1|p')
-LOOP="$(losetup -f --show -o $((${START} * 512)) --sizelimit $((${SIZE} * 512)) "${IMG}")"
+LOOP="$(losetup -f --show -P "${IMGFILE}")"
 if [ $? -ne 0 ]; then
   errexit "Unable to create loop device"
 fi
-if [ "${PART}" = "type=c" ]; then
-  dosfsck "${LOOP}"
+if [ "${PART}" = "1" ]; then
+  dosfsck "${LOOP}p${PART}"
 else
-  FS_TYPE=$(blkid "${LOOP}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
+  FS_TYPE=$(blkid "${LOOP}p${PART}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
   if [ "${FS_TYPE}" = "f2fs" ]; then
-    fsck.f2fs "${LOOP}"
+    fsck.f2fs "${LOOP}p${PART}"
   else
-    fsck.ext4 -f "${LOOP}"
+    fsck.ext4 -f "${LOOP}p${PART}"
   fi
 fi
 if [ $? -ne 0 ]; then
   losetup -d "${LOOP}"
   errexit "Filesystem appears corrupted"
 fi
-mount "${LOOP}" ${MNT}
+mount "${LOOP}p${PART}" ${MNT}
 echo ""
-echo "${IMG} mounted on ${MNT}"
+echo "${IMGFILE} mounted on ${MNT}"
 echo ""
 echo "When done, run:"
 echo "umount ${MNT}"

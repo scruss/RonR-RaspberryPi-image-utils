@@ -39,6 +39,14 @@ image-compare compares a running Raspbian system to an existing standard 'raw' i
 image-compare [imagefile]
 
 
+image-info:
+
+image-info displays information about a standard 'raw' image file.  Usage is:
+
+image-info [imagefile]
+
+
+
 image-mount:
 
 image-mount mounts a standard 'raw' image file to allow it to be read or written as if it were a device.  Usage is:
@@ -48,13 +56,13 @@ image-mount imagefile mountpoint [W95|Linux]
 where W95 mounts the BOOT partition and Linux mounts the ROOT partition.  If neither is specified, Linux is assumed.
 
 
-image-set-ptuuid:
+image-set-partuuid:
 
-image-set-ptuuid sets the Partition Table UUID value of a standard 'raw' image file.  Usage is:
+image-set-partuuid sets the ROOT partition PARTUUID value of a standard 'raw' image file.  Usage is:
 
-image-set-ptuuid imagefile ptuuid
+image-set-partuuid imagefile [ hhhhhhhh-02 | hhhhhhhh-hhhh-hhhh-hhhh-hhhhhhhhhhhh | random ]"
 
-where ptuuid is 8 hex digits
+If no partuuid is specified, the current ROOT partuuid will be displayed.
 
 
 image-shrink:
