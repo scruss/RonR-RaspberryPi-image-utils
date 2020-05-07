@@ -214,12 +214,8 @@ fi
 PARTUUID_1="$(blkid "${ROOT_DEV_P}1" | sed -n 's|^.*PARTUUID="\(\S\+\)".*|\1|p')"
 PARTUUID_2="$(blkid "${ROOT_DEV_P}2" | sed -n 's|^.*PARTUUID="\(\S\+\)".*|\1|p')"
 PTUUID="$(blkid "${ROOT_DEV}" | sed -n 's|^.*PTUUID="\(\S\+\)".*|\1|p')"
-INFO="$(tune2fs -l "${ROOT_PART}")"
-BLKCOUNT=$(sed -n 's|^Block count:\s*\(.*\)|\1|p' <<< "${INFO}")
-BLKFREE=$(sed -n 's|^Free blocks:\s*\(.*\)|\1|p' <<< "${INFO}")
-BLKSIZE=$(sed -n 's|^Block size:\s*\(.*\)|\1|p' <<< "${INFO}")
-BLKUSED=$((${BLKCOUNT} - ${BLKFREE}))
-INISIZE=$((((${BLKUSED} + (${BLKUSED} / 10)) * ${BLKSIZE}) / ${ONEMB}))
+DFKFREE=$(df | grep "% /$" | awk '{print $3}')
+INISIZE=$(((${DFKFREE} + (${DFKFREE} / 5)) / 1024))
 IMGNAME=""
 IMGSIZE=""
 IMGINCR=""
