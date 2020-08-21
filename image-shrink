@@ -103,9 +103,9 @@ while read -r -n 1 -s answer; do
 done
 echo ""
 INFO="$(sfdisk -d "${IMGFILE}")"
-BOOTBEG=$(sed -n "s|^${IMGFILE}1.*start=\s*\([0-9]\+\).*$|\1|p" <<< "${INFO}")
-BOOTEND=$((${BOOTBEG} + $(sed -n "s|^${IMGFILE}1.*size=\s*\([0-9]\+\).*$|\1|p" <<< "${INFO}") - 1))
-ROOTBEG=$(sed -n "s|^${IMGFILE}2.*start=\s*\([0-9]\+\).*$|\1|p" <<< "${INFO}")
+BOOTBEG=$(sed -n "s|^${IMGFILE}1\s\+:.*start=\s*\([0-9]\+\).*$|\1|p" <<< "${INFO}")
+BOOTEND=$((${BOOTBEG} + $(sed -n "s|^${IMGFILE}1\s\+:.*size=\s*\([0-9]\+\).*$|\1|p" <<< "${INFO}") - 1))
+ROOTBEG=$(sed -n "s|^${IMGFILE}2\s\+:.*start=\s*\([0-9]\+\).*$|\1|p" <<< "${INFO}")
 PARTUUID_1="$(sed -n "s|^${IMGFILE}1.*uuid=\(\S\+\).*$|\1|p" <<< "${INFO}")"
 PARTUUID_2="$(sed -n "s|^${IMGFILE}2.*uuid=\(\S\+\).*$|\1|p" <<< "${INFO}")"
 PTUUID="$(sed -n "s|^label-id: \(\S\+\).*$|\1|p" <<< "${INFO}")"

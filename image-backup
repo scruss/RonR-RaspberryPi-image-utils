@@ -88,7 +88,8 @@ usage()
 -h,--help       This usage description\n\
 -i,--initial    pathto/filename of image file [,inital size MB [,added space for incremental MB]]\n\
 -n,--noexpand   Do not expand filesystem on first run after restore\n\
--o,--options    Additional rsync options (comma separated)"
+-o,--options    Additional rsync options (comma separated)\n\
+-x,--extract    Extract image from NOOBS (force BOOT partition to -01 / ROOT partition to -02)"
 }
 
 backup()
@@ -106,16 +107,21 @@ backup()
     errexit "Unable to create image directories"
   fi
   chmod a+rwxt "${MNTPATH}/tmp/"
+  if [ "${EXTRACT}" = "TRUE" ]; then
+    sed -i "/^[[:space:]]*#/!s|^\(.*root=\)\S\+\(\s\+.*\)$|\1PARTUUID=${PTUUID}-02\2|" "${MNTPATH}/boot/cmdline.txt"
+    sed -i "/^[[:space:]]*#/!s|^\S\+\(\s\+/boot\s\+.*\)$|PARTUUID=${PTUUID}-01\1|" "${MNTPATH}/etc/fstab"
+    sed -i "/^[[:space:]]*#/!s|^\S\+\(\s\+/\s\+.*\)$|PARTUUID=${PTUUID}-02\1|" "${MNTPATH}/etc/fstab"
+  fi
   if [[ "${NOEXPAND}" = "FALSE" && "${ROOT_TYPE}" != "f2fs" && $(grep -v '^[[:space:]]*#' "${MNTPATH}/etc/rc.local" | grep -c 'resize-root-fs') -eq 0 ]]; then
     cat <<\EOF1 > "${MNTPATH}/etc/resize-root-fs"
 #!/bin/bash
 
 ROOT_PART="$(mount | sed -n 's|^\(/dev/.*\) on / .*|\1|p')"
-ROOT_DEV="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
+ROOT_DEV="$(sed 's/[0-9]\+$//' <<< "${ROOT_PART}")"
 if [ "${ROOT_DEV}" = "/dev/mmcblk0p" ]; then
   ROOT_DEV="${ROOT_DEV:0:(${#ROOT_DEV} - 1)}"
 fi
-START=$(sfdisk -d "${ROOT_DEV}" | sed -n "s|^${ROOT_PART}.*start=\s*\([0-9]\+\).*$|\1|p")
+START=$(sfdisk -d "${ROOT_DEV}" | sed -n "s|^${ROOT_PART}\s\+:.*start=\s*\([0-9]\+\).*$|\1|p")
 PTTYPE="$(blkid "${ROOT_DEV}" | sed -n 's|^.*PTTYPE="\(\S\+\)".*|\1|p')"
 if [ "${PTTYPE}" = "dos" ]; then
   sfdisk --delete "${ROOT_DEV}" 2 > /dev/null
@@ -201,12 +207,12 @@ if [ $? -ne 0 ]; then
   errexit "rsync not installed (run: apt-get install rsync)"
 fi
 ROOT_PART="$(mount | sed -n 's|^\(/dev/.*\) on / .*|\1|p')"
-ROOT_TYPE=$(blkid "${ROOT_PART}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
-ROOT_DEV_P="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
-ROOT_DEV="${ROOT_PART:0:(${#ROOT_PART} - 1)}"
+ROOT_DEV_P="$(sed 's/[0-9]\+$//' <<< "${ROOT_PART}")"
+ROOT_DEV="${ROOT_DEV_P}"
 if [ "${ROOT_DEV}" = "/dev/mmcblk0p" ]; then
   ROOT_DEV="${ROOT_DEV:0:(${#ROOT_DEV} - 1)}"
 fi
+ROOT_TYPE=$(blkid "${ROOT_PART}" | sed -n 's|^.*TYPE="\(\S\+\)".*|\1|p')
 PTTYPE="$(blkid "${ROOT_DEV}" | sed -n 's|^.*PTTYPE="\(\S\+\)".*|\1|p')"
 if [[ "${PTTYPE}" != "dos" && "${PTTYPE}" != "gpt" ]]; then
   errexit "Unsupported partition table type: ${PTTYPE}"
@@ -221,6 +227,7 @@ IMGSIZE=""
 IMGINCR=""
 IMGFILE=""
 OPTIONS=()
+EXTRACT=FALSE
 NOEXPAND=FALSE
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -251,6 +258,11 @@ while [ $# -gt 0 ]; do
       OPTIONS=($2)
       IFS=${OIFS}
       shift 2
+      ;;
+
+    -x|--extract)
+      EXTRACT=TRUE
+      shift
       ;;
 
     -*|--*)
@@ -412,7 +424,7 @@ EOF
     rmloop
     NEWSIZE=$(sed -n 's|^Block count:\s*\(.*\)|\1|p' <<< "${INFO}")
     BLKSIZE=$(sed -n 's|^Block size:\s*\(.*\)|\1|p' <<< "${INFO}")
-    START=$(sfdisk -d ${IMGFILE} | sed -n "s|^${IMGFILE}2.*start=\s*\([0-9]\+\).*$|\1|p")
+    START=$(sfdisk -d ${IMGFILE} | sed -n "s|^${IMGFILE}2\s\+:.*start=\s*\([0-9]\+\).*$|\1|p")
     NEWEND=$((${START} + (${NEWSIZE} * (${BLKSIZE} / 512)) + ((${ADDMB} * ${ONEMB}) / 512) - 1))
     if [ "${PTTYPE}" = "gpt" ]; then
       ((NEWEND += 33))

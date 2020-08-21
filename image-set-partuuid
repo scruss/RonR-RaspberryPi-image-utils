@@ -165,7 +165,6 @@ else
     errexit "Image ROOT filesystem appears corrupted"
   fi
   rmloop
-  echo ""
   if [ "${PTTYPE}" = "dos" ]; then
     if [ "${PARTUUID}" = "random" ]; then
       PTUUID="$(hexdump -n 4 -e '"%08X"' /dev/random | tr [A-Z] [a-z])"

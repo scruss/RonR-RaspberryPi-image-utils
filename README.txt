@@ -5,6 +5,7 @@ Usage: image-backup [options] [pathto/imagefile for incremental backup]
 -i,--initial    pathto/filename of image file [,inital size MB [,added space for incremental MB]]
 -n,--noexpand   Do not expand filesystem on first run after restore
 -o,--options    Additional rsync options (comma separated)
+-x,--extract    Extract image from NOOBS (force BOOT partition to -01 / ROOT partition to -02)"
 
 image-backup creates a backup of a running Raspbian system to a standard 'raw' image file that can be written to an SD card or a USB device with Etcher, imageUSB, etc. It will also perform incremental updates to an existing backup image file.
 
